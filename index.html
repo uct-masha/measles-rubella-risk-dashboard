@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Measles &amp; Rubella Risk Dashboard</title>
+<meta name="description" content="Measles and rubella outbreak risk by municipality.">
+
+<meta property="og:title" content="Measles &amp; Rubella Risk Dashboard">
+<meta property="og:description" content="Measles and rubella outbreak risk by municipality.">
+<meta property="og:type" content="website">
+
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1b1b1b;
+    --muted: #5c5c5c;
+    --accent: #c0392b;
+    --border: #e3e3e3;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    height: 100%;
+    /* Only the report scrolls; the shell behind it never does. */
+    overflow: hidden;
+  }
+
+  #shell {
+    position: relative;
+    width: 100%;
+    /* dvh follows the mobile URL bar as it hides and shows; vh is the fallback. */
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  #report { width: 100%; height: 100%; }
+
+  #report iframe {
+    border: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ---- Loading state ---- */
+  #status {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px;
+    text-align: center;
+    background: var(--bg);
+    transition: opacity .3s ease;
+  }
+
+  #status[hidden] { display: none; }
+  #status.fading { opacity: 0; pointer-events: none; }
+
+  .spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .9s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation-duration: 3s; }
+    #status { transition: none; }
+  }
+
+  #status p {
+    margin: 0;
+    font-size: 15px;
+    color: var(--muted);
+    max-width: 36ch;
+    line-height: 1.5;
+  }
+
+  #status code {
+    background: #f4f4f4;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<div id="shell">
+  <div id="report" role="application" aria-label="Measles and rubella risk dashboard"></div>
+
+  <div id="status">
+    <div class="spinner" id="spinner" role="status" aria-label="Loading dashboard"></div>
+    <p id="status-text">Loading the dashboard&hellip;</p>
+  </div>
+</div>
+
+<script>
+/* ==================================================================
+   MEASLES & RUBELLA RISK DASHBOARD - public web wrapper
+
+   Serves the phone-shaped report page to phones and the standard
+   report to everything else, from a single public URL.
+
+   WHY IT WORKS THIS WAY
+   ---------------------
+   Power BI's web service never renders the mobile-optimised layout
+   (the mobile.json layouts in this repo) in a browser - that layout
+   is exclusive to the Power BI mobile apps. The JavaScript SDK can
+   reach it via a `layoutType` setting, but the SDK requires a report
+   id and a real access token, which "Publish to web" does not issue.
+   So the SDK route is unavailable on a free public deployment.
+
+   What DOES work on publish-to-web is the `pageName` URL parameter.
+   So the mobile experience is delivered as real, phone-shaped report
+   PAGES (320px-wide canvas), and this wrapper routes visitors to the
+   right page based on their screen.
+================================================================== */
+
+
+/* ---------------- 1. The publish-to-web link ----------------------
+   Power BI service -> open the report -> File -> Embed report
+                    -> Publish to web (public) -> copy the LINK
+                       (the plain https://app.powerbi.com/view?r=...
+                        URL, not the full <iframe> snippet).
+
+   This link is public and unauthenticated by design. Regenerating the
+   embed code in Power BI invalidates the old link, so update this
+   value whenever that happens.                                     */
+var PBI_URL = "https://app.powerbi.com/view?r=eyJrIjoiYjc3ODEyZGUtNjVmYi00Nzg4LTk5ZWUtM2EzYjM1YTJiN2MwIiwidCI6IjI1M2Q3NGI2LThlMDAtNDc3OC04NWEyLTMwOWIwODA4YzQ2MyJ9";
+
+
+/* ---------------- 2. Page routing --------------------------------
+   Page names are the ids in MRTool_NICD_final.Report/definition/pages/.
+   DESKTOP_PAGE empty means "use whatever the report opens on".
+
+   PHONE_PAGE must be the id of the phone-shaped LANDING page once it
+   has been generated. Leave it empty and phones simply get the
+   standard report - degraded, but never broken.                    */
+var DESKTOP_PAGE = "5ba118fcfb8aea392769";  // Landing Page
+var PHONE_PAGE   = "4b6a6aa7dd2672068ec6";  // Landing Page (Mobile)
+
+
+/* ---------------- 3. Breakpoint -----------------------------------
+   At or below this width we serve the phone page. 640px covers phones
+   in portrait; tablets and larger get the standard report.          */
+var PHONE_BREAKPOINT = 640;
+
+/* ================================================================= */
+
+(function () {
+  "use strict";
+
+  var container  = document.getElementById("report");
+  var status     = document.getElementById("status");
+  var statusText = document.getElementById("status-text");
+  var spinner    = document.getElementById("spinner");
+
+  var currentMode = null;   // "phone" | "desktop"
+  var hideTimer   = null;
+
+  /* An explicit ?view=mobile / ?view=desktop overrides the breakpoint.
+     Handy for checking the phone page from a desktop browser without
+     resizing the window, and for linking straight to one version. */
+  function forcedView() {
+    var m = /[?&]view=(mobile|phone|desktop)\b/i.exec(window.location.search);
+    if (!m) return null;
+    return /desktop/i.test(m[1]) ? "desktop" : "phone";
+  }
+
+  function detectMode() {
+    return forcedView() ||
+      (window.matchMedia("(max-width: " + PHONE_BREAKPOINT + "px)").matches
+        ? "phone" : "desktop");
+  }
+
+  function showStatus(message, withSpinner) {
+    statusText.innerHTML = message;
+    spinner.style.display = withSpinner === false ? "none" : "";
+    status.hidden = false;
+    status.classList.remove("fading");
+  }
+
+  function hideStatus() {
+    if (status.hidden) return;
+    status.classList.add("fading");
+    window.setTimeout(function () { status.hidden = true; }, 300);
+  }
+
+  function buildSrc(mode) {
+    var page = (mode === "phone") ? PHONE_PAGE : DESKTOP_PAGE;
+    var src  = PBI_URL;
+    if (page) {
+      src += (src.indexOf("?") === -1 ? "?" : "&") +
+             "pageName=" + encodeURIComponent(page);
+    }
+    return src;
+  }
+
+  function embed(mode) {
+    container.innerHTML = "";
+
+    var frame = document.createElement("iframe");
+    frame.setAttribute("title", "Measles and rubella risk dashboard");
+    frame.setAttribute("allowfullscreen", "true");
+    frame.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+    frame.setAttribute("src", buildSrc(mode));
+    container.appendChild(frame);
+
+    frame.addEventListener("load", hideStatus);
+    /* Cross-origin frames don't always fire load reliably, so clear the
+       overlay on a timer too rather than trapping the user behind it. */
+    window.clearTimeout(hideTimer);
+    hideTimer = window.setTimeout(hideStatus, 3000);
+  }
+
+  function render() {
+    var mode = detectMode();
+    if (mode === currentMode) return;     // nothing changed
+    currentMode = mode;
+    showStatus("Loading the dashboard&hellip;");
+    embed(mode);
+  }
+
+  /* Reloading the iframe throws away whatever page the visitor had
+     navigated to, so only do it when the breakpoint is actually
+     crossed - not on every resize. Debounced, because rotating a
+     phone fires a burst of resize events. An explicit ?view= pins the
+     mode, so leave those visitors alone entirely. */
+  var resizeTimer;
+  window.addEventListener("resize", function () {
+    if (forcedView()) return;
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(render, 250);
+  });
+
+  if (PBI_URL.indexOf("PASTE_YOUR_PUBLISH_TO_WEB_CODE_HERE") !== -1) {
+    showStatus(
+      "This page is not configured yet.<br>Add the Power BI " +
+      "<em>Publish to web</em> link to <code>PBI_URL</code> in this file.",
+      false
+    );
+  } else {
+    render();
+  }
+})();
+</script>
+
+</body>
+</html>
