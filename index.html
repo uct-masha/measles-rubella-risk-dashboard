@@ -35,17 +35,26 @@
   #shell {
     position: relative;
     width: 100%;
+    /* Clips the iframe overhang added below. */
+    overflow: hidden;
     /* dvh follows the mobile URL bar as it hides and shows; vh is the fallback. */
     height: 100vh;
     height: 100dvh;
   }
 
-  #report { width: 100%; height: 100%; }
+  #report { width: 100%; height: 100%; overflow: hidden; }
 
+  /* Power BI's viewer never lets its canvas reach the right edge: it
+     keeps a 15px fit-to-width gutter plus a 12px vertical scrollbar,
+     and left-aligns the canvas, so all 27px land on the right. That
+     is ~7% of a phone screen, and it sits inside a cross-origin frame
+     where no CSS here can reach it. Measured constant at 360, 375,
+     390 and 430 wide, so over-size the frame by exactly that much and
+     let #shell clip the strip off-screen. */
   #report iframe {
     border: 0;
     display: block;
-    width: 100%;
+    width: calc(100% + 27px);
     height: 100%;
   }
 
